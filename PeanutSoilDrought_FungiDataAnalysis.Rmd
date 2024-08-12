@@ -1,0 +1,995 @@
+---
+title: "PeanutSoilDrought_FungiDataAnalysis"
+author: "Laura Rodriguez, Morgan Bragg, Zachary Noel"
+date: "2024-08-12"
+output: html_document
+---
+
+# Peanut soil microbiome : Fungi
+
+# soil collected from: Wiregrass Research and Extension Center
+
+## data collected: 2021
+
+**Load packages and set working directory**
+```{r}
+library(phyloseq)
+library(decontam)
+#install.packages("remotes")
+#remotes::install_github("DanielSprockett/reltools")
+library(reltools)
+#install.packages("minpack.lm")
+library(minpack.lm)
+#remotes::install_github("DanielSprockett/tyRa")
+#install.packages("DanielSprockett/tyRa")
+library(tyRa)
+#install.packages("Hmisc")
+library(Hmisc)
+library(Biostrings)
+library(ggplot2)
+library(dplyr)
+#install.packages("dplyr")
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(ggrepel)
+library(microbiome)
+#install.packages("devtools")
+library(devtools)
+library(picante)
+library(ape)
+library(phangorn)
+library(adegenet)
+library(emmeans)
+library(lme4)
+library(AICcmodavg)
+library(car)
+library(DESeq2)
+library(effects)
+library(microViz)
+library(paletteer)
+library(RColorBrewer)
+library(ANCOMBC)
+```
+
+**Color palette**
+```{r}
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+bacteria.colors <- c("#c6dbef","#9ecae1","#6baed6","#3182bd","#08519c",
+                           "#c7e9c0", "#a1d99b", "#74c476", "#41ab5d", "#238b45", "#005a32",
+                           "#fdd0a2", "#fdae6b", "#fd8d3c", "#f16913", "#d94801", "#8c2d04",
+                           "#dadaeb", "#bcbddc", "#9e9ac8", "#807dba", "#6a51a3", "#4a1486",
+                           "#fcbba1", "#fc9272", "#fb6a4a", "#ef3b2c", "#cb181d", "#99000d",
+                           "#d9d9d9", "#bdbdbd", "#969696", "#737373", "#525252", "#252525",
+                           "darkgoldenrod1", "darkgoldenrod3", "darkgoldenrod", "darkgoldenrod4")
+
+#need more colors for volcano plot
+p1 <- paletteer_d("colorBlindness::paletteMartin")
+p2 <- paletteer_d("ggsci::default_aaas")
+p3 <- paletteer_d("ggsci::default_jama")
+p4 <- paletteer_d("ggsci::category10_d3")
+p5 <- c("#7D0226","#300049", "#165459", "#3F2327", "#0B1948", "#193006")
+p6 <- paletteer_d("ggsci::light_uchicago")
+p7 <- paletteer_d("ggsci::uniform_startrek")
+treatment_colors <- paletteer_d("ggthemes::Classic_Green_Orange_6", n=5)
+week_colors <- paletteer_d("fishualize::Scarus_quoyi", n=5)
+
+more <- brewer.pal(8, "Dark2")
+
+even_more <- brewer.pal(11, "BrBG")
+
+large_palette <- c(p1, p2, p3, p4, p5, p6, p7, more, even_more)
+```
+
+**Loading data: metadata, OTU table, taxonomy**
+```{r}
+#set working directory
+setwd("/Users/morganbragg 1/Library/CloudStorage/Box-Box/Auburn/manuscripts/Peanut_soil_WGREC/Fungi")
+
+#metadata
+samp_dat_fungi <- read.csv("metadata_librPrepall02.01.22.csv", na.strings = "NA")
+
+rownames(samp_dat_fungi) <- samp_dat_fungi$Sample #row names must match OTU table headers
+SAMP.fungi <- phyloseq::sample_data(samp_dat_fungi)
+
+# OTU table 
+otu_fungi <- read.csv("otu_tableITS_UNOISE_R1.csv")
+rownames(otu_fungi) <- otu_fungi$OTU
+otu_fungi <- otu_fungi[,-1]
+OTU.fungi <- phyloseq::otu_table(otu_fungi, taxa_are_rows = TRUE)
+
+head(otu_fungi)
+
+colnames(otu_fungi)
+
+# Taxonomy
+NBC_taxonomy <-read.csv("taxa_out_DADA2_NBC.csv",
+                          header = TRUE,
+                          row.names = 1)
+NBC_taxonomy$OTU_sequence <- rownames(NBC_taxonomy)
+#Syntax sequeences, we need them bc syntax was the only one to detect the Mock communities so we use this to substitute in the NBC taxonomy. NBC taxa filters them as unidentified.
+sintax_taxonomy <-read.csv("taxFungi_R1_SINTAX.csv",
+                        header = TRUE,
+                        row.names = 1)
+sintax_taxonomy$OTU <- rownames(sintax_taxonomy)
+
+mock.OTU <- sintax_taxonomy[sintax_taxonomy$Kingdom == "Mocki",]
+```
+
+**Discard "unidentified" in the unite_taxonomy from kingdom and select only Kingdom fungi; We also filter the mock community**
+```{r}
+# Fasta 
+FASTA.fungi <- readDNAStringSet("Fotus_R1.fasta", seek.first.rec=TRUE, use.names=TRUE)
+FASTA.fungi.dataframe <- as.data.frame(FASTA.fungi)
+FASTA.fungi.dataframe$OTU <- rownames(FASTA.fungi.dataframe)
+#so, our NBC taxonomy did not bring the OTU so here we are using fasta and taxonomy to align OTU# and sequence together (OTU_sequence)
+NBC_taxonomy2 <- left_join(FASTA.fungi.dataframe, NBC_taxonomy, by = c("x" = "OTU_sequence"))
+
+head(NBC_taxonomy)
+# Taxonomy 
+#Edit the taxonomy rds. We clean the taxonomy table for ease of use
+
+nbc.tax.fungi <- as.data.frame(NBC_taxonomy2)
+
+rownames(nbc.tax.fungi) <- nbc.tax.fungi$OTU
+nbc.tax.fungi$Kingdom <- gsub('k__','', nbc.tax.fungi$Kingdom)
+nbc.tax.fungi$Phylum <- gsub('p__','', nbc.tax.fungi$Phylum)
+nbc.tax.fungi$Class <- gsub('c__','', nbc.tax.fungi$Class)
+nbc.tax.fungi$Order <- gsub('o__','', nbc.tax.fungi$Order)
+nbc.tax.fungi$Family <- gsub('f__','', nbc.tax.fungi$Family)
+nbc.tax.fungi$Genus <- gsub('g__','', nbc.tax.fungi$Genus)
+nbc.tax.fungi$Species <- gsub('s__','', nbc.tax.fungi$Species)
+# here we replace the na with unidentified
+nbc.tax.fungi <- replace(nbc.tax.fungi, is.na(nbc.tax.fungi), "unidentified")
+#here we moved the unidentified to a column called lowest taxonomic rank
+nbc.tax.fungi$Lowest_Taxnomic_Rank <- ifelse(nbc.tax.fungi$Phylum == "unidentified", nbc.tax.fungi$Kingdom,
+                                             ifelse(nbc.tax.fungi$Class == "unidentified", nbc.tax.fungi$Phylum,
+                                                    ifelse(nbc.tax.fungi$Order == "unidentified", nbc.tax.fungi$Class,
+                                                           ifelse(nbc.tax.fungi$Family == "unidentified", nbc.tax.fungi$Order,
+                                                                  ifelse(nbc.tax.fungi$Genus == "unidentified", nbc.tax.fungi$Family,
+                                                                         ifelse(nbc.tax.fungi$Species == "unidentified", nbc.tax.fungi$Genus, 
+                                                                                paste(nbc.tax.fungi$Genus, nbc.tax.fungi$Species, sep = "_")))))))
+
+nbc.tax.fungi$Label <- paste(nbc.tax.fungi$OTU, nbc.tax.fungi$Lowest_Taxnomic_Rank, sep = "_")
+#now since we want to use the NBC taxa.we picked out the mock communities from Syntax taxonomy and put them in OTU.mock. this way we can tell R which otus to look for when subtituting 
+#the unidentified for mock
+
+#basically what this is doing is putting both taxa(nbc and sintax together. So then we can  run below ifelse. we are basically saying "if nbc taxa OTU match the OTU from the sintax 
+#substitute with the sintax taxa (which it the Mock) if its different do not chance and leave it as it was (which is the nbc taxa).
+nbc.tax.fungi0 <- left_join(nbc.tax.fungi, mock.OTU, by = "OTU")
+
+OTU.mock <- mock.OTU$OTU
+
+nbc.tax.fungi4 <- nbc.tax.fungi0
+#BAsically here we are telling: if mocki otu is found in the nbc.tax.fungi subtitute with kingdom_sintax (that sintax is where the mock communities are found)
+#and if its not a mock keep it the same as the nbc taxonomy.
+nbc.tax.fungi4$Kingdom <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Kingdom_SINTAX, nbc.tax.fungi4$Kingdom)
+nbc.tax.fungi4$Phylum <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Phylum_SINTAX, nbc.tax.fungi4$Phylum)
+nbc.tax.fungi4$Class <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Class_SINTAX, nbc.tax.fungi4$Class)
+nbc.tax.fungi4$Order <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Order_SINTAX, nbc.tax.fungi4$Order)
+nbc.tax.fungi4$Family <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Family_SINTAX, nbc.tax.fungi4$Family)
+nbc.tax.fungi4$Genus <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Genus_SINTAX, nbc.tax.fungi4$Genus)
+nbc.tax.fungi4$Species <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Species_SINTAX, nbc.tax.fungi4$Species)
+nbc.tax.fungi4$Label <- ifelse(nbc.tax.fungi4$OTU %in% OTU.mock, nbc.tax.fungi4$Label_SINTAX, nbc.tax.fungi4$Label)
+
+# getting rid of the sintax portion 
+nbc.tax.fungi5 <- nbc.tax.fungi4 %>%
+  dplyr::select(OTU:Label)
+rownames(nbc.tax.fungi5) <- nbc.tax.fungi5$OTU
+
+# Check for unclassified(unidentified) OTUs and remove them
+nbc.tax.fungi5 <- subset(nbc.tax.fungi5, Kingdom %in% c("Fungi", "Mocki"))
+unique(nbc.tax.fungi5$Kingdom)
+
+#The taxonomy modified and that you will use for there is this one "nbc.tax.fungi5"
+
+TAX.fungi.NBC <- phyloseq::tax_table(as.matrix(nbc.tax.fungi5))
+
+physeq_fungi_nonfilt <- phyloseq::phyloseq(OTU.fungi, TAX.fungi.NBC, FASTA.fungi, SAMP.fungi)
+
+taxa_names(TAX.fungi.NBC)
+```
+
+**Decontaminate**
+```{r}
+## DECONTAMINATE
+physeq_fungi_nonfilt@sam_data$Sample_or_Control <- ifelse(physeq_fungi_nonfilt@sam_data$Isolate.Code %in% c("NEC", "NCP"), "Control Sample", "True Sample")
+sample_data(physeq_fungi_nonfilt)$is.neg <- sample_data(physeq_fungi_nonfilt)$Sample_or_Control == "Control Sample"
+contamdf.prev <- isContaminant(physeq_fungi_nonfilt, method="prevalence", neg="is.neg", threshold = 0.1, normalize = TRUE)
+badTaxa <- rownames(contamdf.prev[contamdf.prev$contaminant == TRUE,])
+
+print(badTaxa)
+
+ps.pa <- transform_sample_counts(physeq_fungi_nonfilt, function(abund) 1*(abund>0))
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$Sample_or_Control == "Control Sample", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$Sample_or_Control == "True Sample", ps.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                    contaminant=contamdf.prev$contaminant)
+#chart name decontaminate
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+goodTaxa <- setdiff(taxa_names(physeq_fungi_nonfilt), badTaxa)
+fungi_sub_no_bad <- prune_taxa(goodTaxa, physeq_fungi_nonfilt)
+```
+
+**Sanity check, here we make sure that the OTUs we have are fungi**
+```{r}
+# Sanity check - we only want OTUs that are Fungi
+unique(fungi_sub_no_bad@tax_table@.Data[,2])# We only want Kingdom Fungi
+
+fungi.obj1 <- fungi_sub_no_bad %>% 
+  subset_taxa(Kingdom == "Fungi") %>%
+  subset_samples(!Isolate.Code %in% c("NEC", "NCP", "PC")) %>%
+  phyloseq::filter_taxa(function(x) sum(x) > 0, TRUE) # remove taxa with zero reads (i.e., those not present in objective 1)
+
+sort(data.frame(sample_sums(fungi.obj1))[,1], decreasing = TRUE)
+```
+
+**Filter and discard all samples with less than 5000 reads**
+```{r}
+# we are going to trash all the samples below 5,000. to make sure we take the best samples.
+## FILTER OUT SAMPLES BELOW 5000 reads
+fungi.obj1_5000reads <- prune_samples(sample_sums(fungi.obj1) > 5000, fungi.obj1) %>%
+  phyloseq::filter_taxa(function(x) sum(x) > 0, TRUE) 
+```
+
+**Total reads obtained**
+```{r}
+sum(taxa_sums(fungi.obj1_5000reads))  
+#Final total for fungi NBC - 23,084,763 reads across 298 (you got this number from:"fungi.obj1_5000reads") samples 
+
+mean(sample_sums(fungi.obj1_5000reads)) # NBC 77,465.65
+median(sample_sums(fungi.obj1_5000reads)) #NBC  73,031
+
+# Save an object to a file
+saveRDS(fungi.obj1_5000reads, file = "Fungi_peanut_soil_nonorm_092723.rds")
+```
+
+**Read in RDS file**
+```{r}
+# Restore the object. you can start from here!!
+fungi.no.norm <- readRDS(file = "Fungi_peanut_soil_nonorm_092723.rds")
+```
+
+**Rarefaction**
+```{r}
+## Rarefaction analysis
+sam.data <- data.frame(fungi.no.norm@sam_data)
+fOTU.table <- fungi.no.norm@otu_table
+S <- specnumber(t(fOTU.table)) # observed number of species
+raremax <- min(rowSums(t(fOTU.table)))
+#Srare <- rarefy(t(fOTU.table), raremax)
+
+## Rarefaction plot
+#devtools::install_github("gauravsk/ranacapa")
+library(ranacapa)
+p1 <- ggrare(fungi.no.norm, step = 1000, se = FALSE)
+#final_ps_fungi = final phyloseq object
+```
+
+**Normalize based on cumulative sum scaling**
+```{r}
+# Normalize based on cumulative sum scaling
+MGS <- phyloseq_to_metagenomeSeq(fungi.no.norm)
+p <- metagenomeSeq::cumNormStatFast(MGS)
+MGS <- metagenomeSeq::cumNorm(MGS, p =p)
+metagenomeSeq::normFactors(MGS) # exports the normalized factors for each sample
+norm.fungi <- metagenomeSeq::MRcounts(MGS, norm = T)
+norm.fungi.OTU <- phyloseq::otu_table(norm.fungi, taxa_are_rows = TRUE)
+
+fungi.css.norm <- phyloseq::phyloseq(norm.fungi.OTU, TAX.fungi.NBC, FASTA.fungi, SAMP.fungi)
+
+# Save an object to a file
+saveRDS(fungi.css.norm, file = "Fungi_peanut_soil_CSS_092723.rds")
+```
+
+**Reads in CSS normalized RDS**
+```{r}
+# Restore the object
+fungi.css.norm <- readRDS(file = "Fungi_peanut_soil_CSS_092723.rds")
+```
+
+**Splitting dataset up by soil type**
+```{r}
+##non normalized
+soilA <- fungi.no.norm %>%
+  subset_samples(Soil == "A") %>%
+  filter_taxa(function(x) sum(x) !=0, TRUE)
+
+
+soilB <- fungi.no.norm %>%
+  subset_samples(Soil == "B") %>%
+  filter_taxa(function(x) sum(x) !=0, TRUE)  
+
+##css normalized
+soilA_css <- fungi.css.norm %>%
+  subset_samples(Soil == "A") %>%
+  filter_taxa(function(x) sum(x) !=0, TRUE)
+
+soilB_css <- fungi.css.norm %>%
+  subset_samples(Soil == "B") %>%
+  filter_taxa(function(x) sum(x) !=0, TRUE) 
+
+#converting week and treatment to factor now. having it in the model messes with some visualizations
+sample_data(soilA)$Treatment <- as.factor(sample_data(soilA)$Treatment)
+sample_data(soilA)$week <- as.factor(sample_data(soilA)$week)
+sample_data(soilB)$Treatment <- as.factor(sample_data(soilB)$Treatment)
+sample_data(soilB)$week <- as.factor(sample_data(soilB)$week)
+
+sample_data(soilA_css)$Treatment <- as.factor(sample_data(soilA_css)$Treatment)
+sample_data(soilA_css)$week <- as.factor(sample_data(soilA_css)$week)
+sample_data(soilB_css)$Treatment <- as.factor(sample_data(soilB_css)$Treatment)
+sample_data(soilB_css)$week <- as.factor(sample_data(soilB_css)$week)
+
+sample_data_A_css <- data.frame(soilA_css@sam_data)
+sample_data_B_css <- data.frame(soilB_css@sam_data)
+```
+
+**Top 20 fungi prevalent peanut soils**
+```{r}
+set.seed(12348)
+topx.fungi <- top_taxa(fungi.no.norm, n = 20) 
+fung.composition <- fungi.no.norm %>%   
+  subset_taxa(OTU %in% topx.fungi) %>%   
+  microbiome::transform("compositional") %>%  
+  psmelt() %>%   
+  group_by(Treatment, Soil, Label) %>%   
+  summarise(MeanRelAbund = mean(Abundance)) %>%  
+  left_join(as.data.frame(tax_table(fungi.no.norm), by = "Label")) %>%   
+  ggplot(aes(Treatment, MeanRelAbund, fill = Label)) +   
+  geom_bar(stat = "identity") +   
+  theme_classic() +   
+  scale_fill_manual(values= c(cbbPalette, fungi.colors)) +   
+  scale_y_continuous(labels = scales::percent) +   
+  labs(x = "", y = "Relative abundance (%)",        title = "Fungi") +   
+  theme(axis.text.x = element_text(angle=45, hjust=1),        
+        legend.text = element_text(face = "italic", size = 5),        
+        legend.title = element_blank(),         
+        legend.key.size = unit(0.3, 'cm')) + 
+  facet_wrap(~Soil, nrow = 1) 
+fung.composition
+```
+
+**Alpha diversity using species richness and Faith's phylogenetic diversity**
+```{r}
+#######SOIL A#########
+#first calculating species richness
+soilA@sam_data$richness <- estimate_richness(soilA, measures=c("Observed"))$Observed
+
+soilA@sam_data$shannon <- estimate_richness(soilA, measures=c("Shannon"))$Shannon
+
+soilA@sam_data$even <- soilA@sam_data$shannon/log(soilA@sam_data$richness)
+
+#create dataframe
+sample_data_A <- data.frame(soilA@sam_data)
+
+#testing homogeneity of variances
+leveneTest(richness ~ week*Treatment, data=sample_data_A)
+#not significant so good
+
+leveneTest(even ~ week*Treatment, data=sample_data_A)
+#not significant so we have equal variances
+
+#now to check if any variables are correlated
+vif(aov(richness ~ week + Treatment, data=sample_data_A))
+
+vif(aov(even ~ week + Treatment, data=sample_data_A))
+#no correlations between richness or even and environmental variable
+
+#now running alpha diversity linear models
+#first species richness
+rich_lm_A <- lm(richness ~ week*Treatment, data = sample_data_A)
+summary(rich_lm_A)
+#week 0 vs all is significant
+#week 2 : treatment 4 p = 0.05
+
+#running null model to ensure our actual model is a better fit
+rich_null_A <- lm(richness ~ 1, data = sample_data_A)
+AICc(rich_null_A)
+#1711
+AICc(rich_lm_A)
+#1655; yep better AIC here
+
+#now running emmeans for pairwise comparisons
+rich_diff_A <- emmeans(rich_lm_A, pairwise ~ week, adjust = "BH")
+pairs(rich_diff_A, interaction = TRUE)
+#week 0 vs week 2,5,7,9 p < 0.0001; all weeks increase in richness compared to 0
+#week 2 vs 5 (p = 0.005) and 7 (p = 0.03); increase of species
+#week 5 vs 9 p = 0.001; decrease in 49 species
+#week 7 vs 9 p = 0.01; decrease in 38 species
+
+#species evenness
+even_lm_A <- lm(even ~ week*Treatment, data = sample_data_A)
+summary(f_even_lm_A)
+#nothing
+
+#running null model to ensure our actual model is a better fit
+even_null_A <- lm(even ~ 1, data = sample_data_A)
+AICc(f_even_null_A)
+#-303
+AICc(f_even_lm_A)
+#-274 so yes real model better fit
+
+#plotting
+plot1 <- sample_data_A %>%
+  ggplot(aes(week, richness)) + geom_boxplot() + theme_bw() + theme_classic() + labs(y="Fungal species richness", x="Week")
+
+ggsave("soilA_richness.pdf", plot1, width = 8, height = 6)
+
+###########SOIL B############
+#first calculating species richness
+soilB@sam_data$richness <- estimate_richness(soilB, measures=c("Observed"))$Observed
+
+soilB@sam_data$shannon <- estimate_richness(soilB, measures=c("Shannon"))$Shannon
+
+soilB@sam_data$even <- soilB@sam_data$shannon/log(soilB@sam_data$richness)
+
+#create dataframe
+sample_data_B <- data.frame(soilB@sam_data)
+
+#testing homogeneity of variances
+leveneTest(richness ~ week*Treatment, data=sample_data_B)
+#not significant so good
+
+leveneTest(even ~ week*Treatment, data=sample_data_B)
+#not significant so we have equal variances
+
+#now to check if any variables are correlated
+vif(aov(richness ~ week + Treatment, data=sample_data_B))
+
+vif(aov(even ~ week + Treatment, data=sample_data_B))
+#no correlations between richness or PD and environmental variable
+
+#now running alpha diversity linear models
+#first species richness
+rich_lm_B <- lm(richness ~ week*Treatment, data = sample_data_B)
+summary(rich_lm_B)
+#week 0 vs all others is sig
+
+#running null model to ensure our actual model is a better fit
+rich_null_B <- lm(richness ~ 1, data = sample_data_B)
+AICc(rich_null_B)
+#1774
+AICc(rich_lm_B)
+#1717; yep better AIC here
+
+#now running emmeans for pairwise comparisons
+rich_diff_B <- emmeans(rich_lm_B, pairwise ~ week, adjust = "BH")
+pairs(rich_diff_B, interaction = TRUE)
+#week 0 vs week 2,5,7,9 p < 0.0001; all weeks increase in richness compared to 0
+#week 2 vs 5 p = 0.003 and 7 p = 0.007; increase in species
+#week 5 vs 9 p = 0.0001; decrease in 67 species
+#week 7 vs 9 p = 0.0003; decrease in 63 species
+
+#species evenness
+even_lm_B <- lm(even ~ week*Treatment, data = sample_data_B)
+summary(even_lm_B)
+#week 0 vs 5 p = 0.001, decrease in 0.12 evenness
+
+even_diff_B <- emmeans(even_lm_B, pairwise ~ week, adjust = "BH")
+pairs(even_diff_B, interaction = TRUE)
+#week 0 vs 5 p = 0.001
+#week 0 vs 9 p = 0.03
+#week 2 vs 5 p = 0.001
+#week 5 vs 7 p = 0.001; decrease
+#week 5 vs 9 p = 0.001; decrease
+
+#running null model to ensure our actual model is a better fit
+even_null_B <- lm(even ~ 1, data = sample_data_B)
+AICc(even_null_B)
+#-353
+AICc(f_even_lm_B)
+#-369 NULL MODEL FITS BETTER!!!!
+
+plot2 <- sample_data_B %>%
+  ggplot(aes(week, richness)) + geom_boxplot() + theme_bw() + theme_classic() + labs(y="Fungal species richness", x="Week")
+
+ggsave("soilB_richness.pdf", plot2, width = 8, height = 6)
+
+plot3 <- sample_data_B %>%
+  ggplot(aes(week, even)) + geom_boxplot() + theme_bw() + theme_classic() + labs(y="Fungal species evenness", x="Week")
+
+ggsave("soilB_evenness.pdf", plot3, width = 8, height = 6)
+
+soilB_alpha <- ggarrange(plot2, plot3)
+ggsave("soilB_alpha.pdf", soilB_alpha, width = 8, height = 6)
+```
+
+**Beta diveristy: Bray-curtis distances**
+```{r}
+#####SOIL A#####
+A.fungi.dist.bray = phyloseq::distance(soilA_css, "bray") # create bray-curtis distance matrix
+A.fungi.ord <- ordinate(soilA_css, "PCoA", "bray")
+A.global.nmds <- plot_ordination(soilA_css, ordination = A.fungi.ord, type = "samples") 
+A.global.nmds.data <- A.global.nmds$data
+
+set.seed(1)
+adonis2(A.fungi.dist.bray~week*Treatment, as(sample_data(soilA_css), "data.frame"), permutations = 9999) 
+#week p = 0.0001
+
+#week pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(A.fungi.dist.bray ~ week, data = as(sample_data(soilA_css), "data.frame"))
+#0 vs 2 p = 0.05
+#0 vs 5 p = 0.001
+#0 vs 7 p = 0.001
+#0 vs 9 p = 0.002
+#makes sense, everything is different than week 0
+#2 vs 5 p = 0.001
+#2 vs 7 p = 0.001
+#2 vs 9 p = 0.02
+#5 vs 7 p = 0.01
+#5 vs 9 p = 0.002
+#basically everything is different from each other except weeks 7 vs 9
+#SAME PATTERN AS BACTERIA
+
+weekA_disp <- betadisper(A.fungi.dist.bray, f_sample_data_A_css$week)
+permutest(weekA_disp)
+#SIGNIFICANT SO VARIANCE DRIVES DIFFERENCE
+plot(weekA_disp)
+#week 0 has least amount of variation, week 2 has more variation then week 5,7,9 have a lot of variation
+#cool to see how variable the microbiome is over time
+
+#beta diversity plot
+plot4 <- A.global.nmds.data %>%
+ggplot() + geom_point(aes(x = Axis.1, y = Axis.2, shape = week, fill = week), alpha = 0.8, size = 3) +
+  theme_bw() +
+  ylab("PCoA2") + 
+  xlab("PCoA1") +
+  theme(text = element_text(size = 15)) +
+  scale_fill_manual(values=week_colors) +
+  scale_shape_manual(values=c(21, 22, 23, 24, 25)) 
+
+ggsave("pcoa_soilA_week_bray.pdf", plot4, dpi = 300, width = 8, height = 6)
+
+#####SOIL B#####
+B.fungi.dist.bray = phyloseq::distance(soilB_css, "bray") # create bray-curtis distance matrix
+B.fungi.ord <- ordinate(soilB_css, "PCoA", "bray")
+B.global.nmds <- plot_ordination(soilB_css, ordination = B.fungi.ord, type = "samples") 
+B.global.nmds.data <- B.global.nmds$data
+
+set.seed(2)
+adonis2(B.fungi.dist.bray~week*Treatment, as(sample_data(soilB_css), "data.frame"), permutations = 9999) 
+#week p = 0.0001
+#treatment p = 0.006
+
+#week pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(B.fungi.dist.bray ~ week, data = as(sample_data(soilB_css), "data.frame"))
+#0 vs 2 p = 0.002
+#0 vs 5 p = 0.001
+#0 vs 7 p = 0.001
+#0 vs 9 p = 0.001
+#makes sense, everything is different than week 0
+#2 vs 5 p = 0.001
+#2 vs 7 p = 0.02
+#2 vs 9 p = 0.009
+#5 vs 7 p = 0.003
+#5 vs 9 p = 0.001
+#basically everything is different from each other except weeks 7 vs 9
+#SAME PATTERN AS FUNGAL SOIL A 
+
+weekB_disp <- betadisper(B.fungi.dist.bray, f_sample_data_B_css$week)
+permutest(weekB_disp)
+#barely not sig....p = 0.06
+plot(weekB_disp)
+#week 0 has least amount of variation, week 2 has more variation then week 5,7,9 have a lot of variation
+#cool to see how variable the microbiome is over time
+
+#treatment pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(B.fungi.dist.bray ~ Treatment, data = as(sample_data(soilB_css), "data.frame"))
+#5 vs 1 p = 0.009
+#5 vs 2 p = 0.003
+#ok makes sense
+
+treatB_disp <- betadisper(B.fungi.dist.bray, f_sample_data_B_css$Treatment)
+permutest(treatB_disp)
+#NOT SIG
+plot(treatB_disp)
+
+
+#beta diversity plot
+plot5 <- B.global.nmds.data %>%
+ggplot() + geom_point(aes(x = Axis.1, y = Axis.2, shape = week, fill = week), alpha = 0.8, size = 3) +
+  theme_bw() +
+  ylab("PCoA2") + 
+  xlab("PCoA1") +
+  theme(text = element_text(size = 15)) +
+  scale_fill_manual(values=week_colors) +
+  scale_shape_manual(values=c(21, 22, 23, 24, 25)) 
+
+ggsave("pcoa_soilB_week_bray.pdf", plot5, dpi = 300, width = 8, height = 6)
+
+#treatment beta diversity plot
+plot6 <- B.global.nmds.data %>%
+ggplot() + geom_point(aes(x = Axis.1, y = Axis.2, shape = Treatment, fill = Treatment), alpha = 0.8, size = 3) +
+  theme_bw() +
+  ylab("PCoA2") + 
+  xlab("PCoA1") +
+  theme(text = element_text(size = 15)) +
+  scale_fill_manual(values=treatment_colors) +
+  scale_shape_manual(values=c(21, 22, 23, 24, 25)) 
+
+ggsave("pcoa_soilB_treat_jacc.pdf", plot6, dpi = 300, width = 8, height = 6)
+
+soil_b_beta <- ggarrange(plot5, plot6)
+ggsave("soilB_beta.pdf", soil_b_beta, dpi = 300, width = 15, height = 10)
+```
+
+**Beta diversity: Jaccards distances**
+```{r}
+#####SOIL A#####
+A.fungi.dist.jacc = phyloseq::distance(soilA_css, "jaccard") # create bray-curtis distance matrix
+A.fungi.ord <- ordinate(soilA_css, "PCoA", "jaccard")
+A.global.nmds <- plot_ordination(soilA_css, ordination = A.fungi.ord, type = "samples") 
+A.global.nmds.data <- A.global.nmds$data
+
+set.seed(3)
+adonis2(A.fungi.dist.jacc~as.factor(week)*as.factor(Treatment), as(sample_data(soilA_css), "data.frame"), permutations = 9999) 
+#week p = 0.0001
+#same as bray
+
+#week pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(A.fungi.dist.jacc ~ week, data = as(sample_data(soilA_css), "data.frame"))
+#0 vs 2 p = 0.04
+#0 vs 5 p = 0.001
+#0 vs 7 p = 0.001
+#0 vs 9 p = 0.001
+#makes sense, everything is different than week 0
+#2 vs 5 p = 0.001
+#2 vs 7 p = 0.001
+#2 vs 9 p = 0.01
+#5 vs 7 p = 0.01
+#5 vs 9 p = 0.001
+#basically everything is different from each other except weeks 7 vs 9
+#SAME PATTERN AS BACTERIA and bray
+
+weekA_disp <- betadisper(A.fungi.dist.jacc, f_sample_data_A_css$week)
+permutest(weekA_disp)
+#SIGNIFICANT SO VARIANCE DRIVES DIFFERENCE
+plot(weekA_disp)
+#week 0 has least amount of variation, week 2 has more variation then week 5,7,9 have a lot of variation
+#cool to see how variable the microbiome is over time
+
+
+#####SOIL B#####
+B.fungi.dist.jacc = phyloseq::distance(soilB_css, "jaccard") # create bray-curtis distance matrix
+B.fungi.ord <- ordinate(soilB_css, "PCoA", "jaccard")
+B.global.nmds <- plot_ordination(soilB_css, ordination = B.fungi.ord, type = "samples") 
+B.global.nmds.data <- B.global.nmds$data
+
+set.seed(4)
+adonis2(B.fungi.dist.jacc~as.factor(week)*as.factor(Treatment), as(sample_data(soilB_css), "data.frame"), permutations = 9999) 
+#week p = 0.0001
+#treatment p = 0.007
+
+#week pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(B.fungi.dist.jacc ~ week, data = as(sample_data(soilB_css), "data.frame"))
+#0 vs 2 p = 0.002
+#0 vs 5 p = 0.001
+#0 vs 7 p = 0.001
+#0 vs 9 p = 0.001
+#makes sense, everything is different than week 0
+#2 vs 5 p = 0.001
+#2 vs 7 p = 0.01
+#2 vs 9 p = 0.006
+#5 vs 7 p = 0.001
+#5 vs 9 p = 0.001
+#basically everything is different from each other except weeks 7 vs 9
+#SAME PATTERN AS FUNGAL SOIL A and bray
+
+weekB_disp <- betadisper(B.fungi.dist.jacc, f_sample_data_B_css$week)
+permutest(weekB_disp)
+#barely not sig....p = 0.07
+plot(weekB_disp)
+#week 0 has least amount of variation, week 2 has more variation then week 5,7,9 have a lot of variation
+#cool to see how variable the microbiome is over time
+
+#treatment pairwise test and beta dispersion
+pairwiseAdonis::pairwise.adonis2(B.fungi.dist.jacc ~ Treatment, data = as(sample_data(soilB_css), "data.frame"))
+#5 vs 1 p = 0.01
+#5 vs 2 p = 0.003
+#ok makes sense
+
+treatB_disp <- betadisper(B.fungi.dist.jacc, f_sample_data_B_css$Treatment)
+permutest(treatB_disp)
+#NOT SIG
+plot(treatB_disp)
+```
+
+**Differential abundance with ANCOMBC-2**
+```{r}
+######SOIL A
+#filtering to compare treatment 1 vs 5, both extremes. 1 = drought, 5 = flooded out
+#Need to filter OTUs to only include OTUs present in at least 15 samples (25% of total; total = 60). help with visualizations, avoiding 
+#https://www.bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#data-transformations-and-visualization
+DA_soilA_1vs5 <- soilA %>%
+  phyloseq::subset_samples(Treatment %in% c("1", "5")) %>%
+ filter_taxa(function (x) {sum(x>0) >=15}, prune = TRUE) %>%
+  phyloseq::filter_taxa(function(x) sum(x) > 0, TRUE)
+
+#pulling out taxonomy table for later
+tax_soilA <- soilA %>%
+  tax_table() %>%
+  as.data.frame()
+
+#run ancombc
+fung_out_A = ancombc2(data = DA_soilA_1vs5, 
+               assay_name = NULL,
+               p_adj_method = "holm", 
+               prv_cut = 0.50, 
+               fix_formula = "Treatment",
+               group = "Treatment", 
+               struc_zero = TRUE, 
+               neg_lb = TRUE, 
+               alpha = 0.05, 
+               global = TRUE, 
+               n_cl = 1, verbose = TRUE)
+
+fun.A.diff.abund <- fung_out_A$res
+fun.A.diff.abund2 <- left_join(fun.A.diff.abund, tax_soilA, by = c("taxon" = "OTU"))
+
+#changing name of intercept column to treatment1
+colnames(fun.A.diff.abund2)[2] <- "lfc_Treatment1"
+colnames(fun.A.diff.abund2)[10] <- "q_Treatment1"
+colnames(fun.A.diff.abund2)[12] <- "diff_Treatment1"
+
+# volcano plot
+volcano <- ggplot(fun.A.diff.abund2, aes(x = lfc_Treatment1, y = -log10(q_Treatment1), shape = diff_Treatment1, color = Class)) +
+  geom_point(show.legend = FALSE) +
+  geom_text_repel(data = fun.A.diff.abund2[fun.A.diff.abund2$q_Treatment1 < 0.01,],
+                  aes(label = Label), size = 3, show.legend = FALSE) + 
+  theme_classic() +
+  scale_color_manual(values = c(cbbPalette, large_palette), name = "Phylum") +
+  scale_shape_manual(values = c(20,24), name = "p ≤ 0.01")
+volcano
+
+ggsave(plot = volcano, filename = "volcano.pdf", dpi = 300, width = 8, height = 6)
+#dev.print(file = "volcano.png", device = png)
+
+
+#######SOIL B
+#filtering to compare treatment 1 vs 5, both extremes. 1 = drought, 5 = flooded out
+#Need to filter OTUs to only include OTUs present in at least 15 samples (25% of total; total = 60). help with visualizations, avoiding 
+#https://www.bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#data-transformations-and-visualization
+DA_soilB_1vs5 <- soilB %>%
+  phyloseq::subset_samples(Treatment %in% c("1", "5")) %>%
+ filter_taxa(function (x) {sum(x>0) >=15}, prune = TRUE) %>%
+  phyloseq::filter_taxa(function(x) sum(x) > 0, TRUE)
+
+#pulling out taxonomy table for later
+tax_soilB <- soilB %>%
+  tax_table() %>%
+  as.data.frame()
+
+#run ancombc
+fung_out_B = ancombc2(data = DA_soilB_1vs5, 
+               assay_name = NULL,
+               p_adj_method = "holm", 
+               prv_cut = 0.50, 
+               fix_formula = "Treatment",
+               group = "Treatment", 
+               struc_zero = TRUE, 
+               neg_lb = TRUE, 
+               alpha = 0.05, 
+               global = TRUE, 
+               n_cl = 1, verbose = TRUE)
+
+fun.B.diff.abund <- fung_out_B$res
+fun.B.diff.abund2 <- left_join(fun.B.diff.abund, tax_soilB, by = c("taxon" = "OTU"))
+
+write.csv(fun.B.diff.abund2, "fungi_soilB_ancombc.csv")
+
+#changing name of intercept column to treatment1
+colnames(fun.B.diff.abund2)[2] <- "lfc_Treatment1"
+colnames(fun.B.diff.abund2)[10] <- "q_Treatment1"
+colnames(fun.B.diff.abund2)[12] <- "diff_Treatment1"
+
+# volcano plot
+volcano1 <- ggplot(fun.B.diff.abund2, aes(x = lfc_Treatment1, y = -log10(q_Treatment1), shape = diff_Treatment1, color = Class)) +
+  geom_point(show.legend = FALSE) +
+  geom_text_repel(data = fun.B.diff.abund2[fun.B.diff.abund2$q_Treatment1 < 0.05,],
+                  aes(label = Label), size = 3, show.legend = FALSE) + 
+  theme_classic() +
+  scale_color_manual(values = c(cbbPalette, large_palette), name = "Phylum") +
+  scale_shape_manual(values = c(20,24), name = "p ≤ 0.05")
+volcano1
+
+ggsave("fungi_soilB_volcano.pdf", volcano1, dpi = 300, width = 8, height = 6)
+
+ancombc_soilA_seq <- (as.data.frame(refseq(DA_soilA_1vs5)))
+ancombc_soilB_seq <- (as.data.frame(refseq(DA_soilB_1vs5)))
+
+write.csv(ancombc_soilA_seq, "ancombc_soilA_seq.csv")
+write.csv(ancombc_soilB_seq, "ancombc_soilB_seq.csv")
+```
+
+**Core microbiome fungi**
+```{r}
+#11.13.22 core microbiome
+fungi.no.norm@sam_data$Sample
+
+map <- fungi.no.norm@sam_data %>%
+  as("data.frame")
+# Core - abundance occupancy modeling- SOYBEAN
+core.prioritizing <- function(phyloseq.object){
+  
+  set.seed(19)
+  rare.phyloseq.object <- rarefy_even_depth(phyloseq.object, replace=TRUE)
+  
+  nReads=sample_sums(rare.phyloseq.object)[[1]]                          # input dataset needs to be rarified and the rarifaction depth included
+  otu <- rare.phyloseq.object@otu_table %>%
+    as("matrix")
+  map <- rare.phyloseq.object@sam_data %>%
+    as("data.frame")
+  
+  otu_PA <- 1*((otu>0)==1)                                               # presence-absence data
+  otu_occ <- rowSums(otu_PA)/ncol(otu_PA)                                # occupancy calculation
+  otu_rel <- apply(decostand(otu, method="total", MARGIN=2),1, mean)     # mean relative abundance
+  occ_abun <- add_rownames(as.data.frame(cbind(otu_occ, otu_rel)),'otu') # combining occupancy and abundance data frame
+  
+  # Ranking OTUs based on their occupancy
+  # For caluclating raking index we included following conditions:
+  #   - time-specific occupancy (sumF) = frequency of detection within time point (genotype or site)
+  #   - replication consistency (sumG) = has occupancy of 1 in at least one time point (genotype or site) (1 if occupancy 1, else 0)
+  
+  PresenceSum <- data.frame(otu = as.factor(row.names(otu)), otu) %>%
+    gather(Sample, abun, -otu) %>%
+    left_join(map, by = 'Sample') %>% #edit for sample id column in metadata
+    group_by(otu, week) %>% #edit for time point column in metadata
+    dplyr::summarise(time_freq=sum(abun>0)/length(abun),            # frequency of detection between time points
+                     coreTime=ifelse(time_freq == 1, 1, 0)) %>%     # 1 only if occupancy 1 with specific time, 0 if not
+    group_by(otu) %>%
+    dplyr::summarise(sumF=sum(time_freq),
+                     sumG=sum(coreTime),
+                     nS=length(week)*2,  #edit for time point column in metadata        
+                     Index=(sumF+sumG)/nS)                 # calculating weighting Index based on number of time points detected and
+  
+  otu_ranked <- occ_abun %>%
+    left_join(PresenceSum, by='otu') %>%
+    transmute(otu=otu,
+              rank=Index) %>%
+    arrange(desc(rank))
+  
+  # Calculating the contribution of ranked OTUs to the BC similarity
+  BCaddition <- NULL
+  
+  # calculating BC dissimilarity based on the 1st ranked OTU
+  # with 36 samples there should be 630 combinations n!/r!
+  otu_start=otu_ranked$otu[1]                  
+  start_matrix <- as.matrix(otu[otu_start,])
+  start_matrix <- t(start_matrix)
+  x <- apply(combn(ncol(start_matrix), 2), 2, function(x) sum(abs(start_matrix[,x[1]]- start_matrix[,x[2]]))/(2*nReads))
+  x_names <- apply(combn(ncol(start_matrix), 2), 2, function(x) paste(colnames(start_matrix)[x], collapse=' - '))
+  df_s <- data.frame(x_names,x)
+  df_s$rank_count <- 1
+  BCaddition <- rbind(BCaddition,df_s)
+  # calculating BC dissimilarity based on additon of ranked OTUs from 2nd to 500th. Can be set to the entire length of OTUs in the dataset, however it might take some time if more than 5000 OTUs are included.
+  for(i in 2:500){                              
+    otu_add=otu_ranked$otu[i]                      
+    add_matrix <- as.matrix(otu[otu_add,])
+    add_matrix <- t(add_matrix)
+    start_matrix <- rbind(start_matrix, add_matrix)
+    x <- apply(combn(ncol(start_matrix), 2), 2, function(x) sum(abs(start_matrix[,x[1]]-start_matrix[,x[2]]))/(2*nReads))
+    #x_names <- apply(combn(ncol(start_matrix), 2), 2, function(x) paste(colnames(start_matrix)[x], collapse=' - '))
+    df_a <- data.frame(x_names,x)
+    df_a$rank_count <- i 
+    BCaddition <- rbind.data.frame(BCaddition, df_a)
+  }
+  # calculating the BC dissimilarity of the whole dataset (not needed if the second loop is already including all OTUs)
+  x <-  apply(combn(ncol(otu), 2), 2, function(x) sum(abs(otu[,x[1]]-otu[,x[2]]))/(2*nReads))  
+  x_names <- apply(combn(ncol(otu), 2), 2, function(x) paste(colnames(otu)[x], collapse=' - '))
+  df_full <- data.frame(x_names,x)
+  df_full$rank_count <- length(rownames(otu))
+  BCfull <- rbind.data.frame(BCaddition, df_full)
+  
+  BC_ranked <- BCfull %>%
+    group_by(rank_count) %>%
+    dplyr::summarise(MeanBC=mean(x)) %>%            # mean Bray-Curtis dissimilarity
+    arrange(desc(-MeanBC)) %>%
+    mutate(proportionBC=MeanBC/max(MeanBC))   # proportion of the dissimilarity explained by the n number of ranked OTUs
+  Increase=BC_ranked$MeanBC[-1]/BC_ranked$MeanBC[-length(BC_ranked$MeanBC)]
+  increaseDF <- data.frame(IncreaseBC=c(0,(Increase)), rank=factor(c(1:(length(Increase)+1))))
+  increaseDF$rank <- as.numeric(increaseDF$rank)
+  BC_ranked <- left_join(BC_ranked, increaseDF, by = c("rank_count" = "rank"))
+  BC_ranked <- BC_ranked[-nrow(BC_ranked),]
+  
+  #Creating threshold for core inclusion - last call method
+  
+  #B) Final increase in BC similarity of equal or greater then 2%
+  lastCall <- last(as.numeric(BC_ranked$rank_count[(BC_ranked$IncreaseBC>=1.02)]))
+  
+  #Creating plot of Bray-Curtis similarity
+  plot <- ggplot(BC_ranked[1:100,], aes(x=factor(BC_ranked$rank_count[1:100], levels=BC_ranked$rank_count[1:100]))) +
+    geom_point(aes(y=proportionBC)) +
+    theme_classic() + theme(strip.background = element_blank(),axis.text.x = element_text(size=7, angle=45)) +
+    geom_vline(xintercept=last(as.numeric(BC_ranked$rank_count[(BC_ranked$IncreaseBC>=1.02)])), lty=3, col='black', cex=.5) +
+    labs(x='ranked OTUs',y='Bray-Curtis similarity') +
+    annotate(geom="text", x=last(as.numeric(BC_ranked$rank[(BC_ranked$IncreaseBC>=1.02)]))+3, y=.5, label=paste("Last 2% increase (",last(as.numeric(BC_ranked$rank[(BC_ranked$IncreaseBC>=1.02)])),")",sep=''), color="black")
+  
+  core.otus.CSS.mean.T1 <- otu_ranked$otu[1:lastCall]
+  return_list <- list(core.otus.CSS.mean.T1, plot, otu_ranked, occ_abun)
+  return(return_list)
+  
+  #Takes a long time
+  fungi.core <- core.prioritizing(fungi.no.norm)
+}
+```
+
+## Save it so we don't have to run such a long function
+
+```{r}
+saveRDS(fungi.core, file = "fungi.no.norm.core_check_point01.11.23.rds")
+```
+
+# Restore the object
+
+```{r}
+# Restore the object
+fungi.core <- readRDS(file = "fungi.no.norm.core_check_point01.11.23.rds")
+```
+
+## Core graph
+
+```{r}
+fungi.core[[1]]
+
+library(tyRa)
+set.seed(19)
+rare.phyloseq.object <- rarefy_even_depth(fungi.no.norm, replace=TRUE)
+
+nReads=sample_sums(rare.phyloseq.object)[[1]]                                                                 # input dataset needs to be rarified and the rarifaction depth included 
+otu <- rare.phyloseq.object@otu_table %>%
+  as("matrix")
+taxa <- rownames(otu)
+map <- rare.phyloseq.object@sam_data %>%
+  as("data.frame")
+spp.out <- tyRa::fit_sncm(spp = t(otu), pool=NULL, taxon=taxa)
+
+predictions <- spp.out$predictions
+predictions$otu <- rownames(predictions)
+
+# Abundance-Occupancy
+taxonomy <- fungi.no.norm@tax_table %>%
+  as("matrix") %>%
+  as_tibble() %>%
+  mutate(otu = rownames(fungi.no.norm@tax_table))
+
+abund.occ3 <- left_join(taxonomy, predictions, by = "otu") 
+
+abund.occ3$core <- ifelse(abund.occ3$otu %in% fungi.core[[1]], "Core", "Not Core")
+
+library(ggrepel)
+
+core <- ggplot() +
+  geom_point(data = abund.occ3, aes(x = log10(p), y = freq, color = fit_class, shape = core), alpha = 0.8, size = 2) +
+  geom_line(color='black', data=abund.occ3, size=1, aes(y=abund.occ3$freq.pred, x=log10(abund.occ3$p)), alpha=.25) +
+  geom_line(color='black', lty='twodash', size=1, data=abund.occ3, aes(y=abund.occ3$pred.upr, x=log10(abund.occ3$p)), alpha=.25)+
+  geom_line(color='black', lty='twodash', size=1, data=abund.occ3, aes(y=abund.occ3$pred.lwr, x=log10(abund.occ3$p)), alpha=.25)+
+  labs(x="log10(Mean relative abundance)", y="Occupancy") + 
+  theme_classic() + 
+  scale_color_manual(values = c("#000000", "#E69F00", "#56B4E9")) +
+  geom_text_repel(data = abund.occ3[abund.occ3$core == "Core" & abund.occ3$fit_class == "Below prediction",], 
+                  aes(x = log10(p), y = freq, label = Label))
+plot(core)
+
+```
+
+**PCoA visualization of soil A vs B for supplementary figure**
+```{r}
+dist = phyloseq::distance(fungi.css.norm, "bray") # create bray-curtis distance matrix
+ord <- ordinate(fungi.css.norm, "PCoA", "bray")
+nmds <- plot_ordination(fungi.css.norm, ordination = ord, type = "samples") 
+nmds.data <- nmds$data
+
+sup_plot <- nmds.data %>%
+ggplot() + geom_point(aes(x = Axis.1, y = Axis.2, shape = Soil, fill = Soil), alpha = 0.8, size = 3) +
+  theme_bw() +
+  ylab("PCoA2") + 
+  xlab("PCoA1") +
+  theme(text = element_text(size = 15)) +
+  scale_shape_manual(values=c(21, 22, 23, 24, 25)) 
+
+ggsave("fungi_pcoa_soil_bray_sup1.pdf", sup_plot, dpi = 300, width = 8, height = 6)
+```
